@@ -1,0 +1,1143 @@
+'use client';
+
+import { useCallback, useEffect, useReducer, useState } from 'react';
+import { toast } from 'sonner';
+import { Check, Copy, Pencil, X, Info } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { PointBadge, PointInput, SplitPreviewDialog } from '@mochikin/ui/points';
+import { ArchiveFilter } from '@/components/admin/archive-filter';
+import { CopySopDialog } from '@/components/admin/copy-sop-dialog';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { LoadingHint } from '@/components/ui/skeleton-transition';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  CategoryTree,
+  type CategoryWithPoints,
+} from '@/components/admin/category-tree';
+import {
+  PointEditorDialog,
+  type PointFormValues,
+} from '@/components/admin/point-editor-dialog';
+import { TemplateNotice } from '@/components/admin/template-notice';
+import { useUnsavedChanges } from '@/hooks/use-unsaved-changes';
+import { useAutoSaveDraft } from '@/hooks/use-auto-save-draft';
+import {
+  checklistBuilderReducer,
+  INITIAL_CHECKLIST_BUILDER_STATE,
+} from '@/lib/reducers/checklist-builder-reducer';
+import {
+  apiFetch,
+  createCategory,
+  createPoint,
+  duplicateCategory as duplicateCategoryApi,
+  duplicatePoint as duplicatePointApi,
+  listBranches,
+  listCategories,
+  listPoints,
+  listShifts,
+  updateCategory,
+  updatePoint,
+  type AdminBranch,
+  type ChecklistPoint,
+  type ShiftDefinition,
+  type SopCategory,
+} from '@/lib/admin/api';
+import { splitByCategory } from '@mochikin/shared/points';
+
+const INPUT_TYPE_LABEL: Record<string, string> = {
+  centang: 'Centang checklist',
+  foto: 'Foto',
+  teks: 'Jawaban singkat',
+  angka: 'Angka',
+  ok_tidak_ok: 'OK / Tidak OK',
+  paragraf: 'Paragraf',
+  pilihan_ganda: 'Pilihan ganda',
+  kotak_centang: 'Pilihan jamak',
+  dropdown: 'Dropdown',
+  tanggal_waktu: 'Tanggal dan waktu',
+};
+
+interface CategoryFormValues {
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  color: string;
+}
+
+export default function ChecklistBuilderPage() {
+  const [state, dispatch] = useReducer(checklistBuilderReducer, INITIAL_CHECKLIST_BUILDER_STATE);
+  const {
+    branches,
+    branchId,
+    shifts,
+    shiftId,
+    categories,
+    selectedCategoryId,
+    selectedPointId,
+    loading,
+    categoryOpen,
+    editingCategory,
+    categoryName,
+    categorySort,
+    categoryActive,
+    categoryColor,
+    savingCategory,
+    categoryError,
+    pointOpen,
+    editingPoint,
+    savingPoint,
+    pointError,
+    busyId,
+    showArchived,
+    archiveQuery,
+    editingTitle,
+    editingInstruction,
+    titleDraft,
+    instructionDraft,
+    savingInline,
+  } = state;
+
+  // Helper dispatches
+  const setBranches = (v: AdminBranch[]) => dispatch({ type: 'SET_DATA', payload: { branches: v } });
+  const setBranchId = (v: string) => dispatch({ type: 'SET_DATA', payload: { branchId: v } });
+  const setShifts = (v: ShiftDefinition[]) => dispatch({ type: 'SET_DATA', payload: { shifts: v } });
+  const setShiftId = (v: string) => dispatch({ type: 'SET_DATA', payload: { shiftId: v } });
+  const setLoading = (v: boolean) => dispatch({ type: 'SET_LOADING', payload: v });
+  const setSelectedCategoryId = (v: string | null) => dispatch({ type: 'SELECT_CATEGORY', payload: v });
+  const setSelectedPointId = (v: string | null) => dispatch({ type: 'SELECT_POINT', payload: v });
+  const setCategoryOpen = (v: boolean) => dispatch({ type: 'TOGGLE_CATEGORY_FORM', payload: { open: v, category: null } });
+  const setCategoryName = (v: string) => dispatch({ type: 'UPDATE_CATEGORY_DRAFT', payload: { categoryName: v } });
+  const setCategorySort = (v: number) => dispatch({ type: 'UPDATE_CATEGORY_DRAFT', payload: { categorySort: v } });
+  const setCategoryActive = (v: boolean) => dispatch({ type: 'UPDATE_CATEGORY_DRAFT', payload: { categoryActive: v } });
+  const setCategoryColor = (v: string) => dispatch({ type: 'UPDATE_CATEGORY_DRAFT', payload: { categoryColor: v } });
+  const setSavingCategory = (v: boolean) => dispatch({ type: 'SET_SAVING', payload: { field: 'category', value: v } });
+  const setCategoryError = (v: string | null) => dispatch({ type: 'SET_ERROR', payload: { field: 'category', value: v } });
+  const setPointOpen = (v: boolean) => {
+    if (!v) {
+      setPointCategoryId(null);
+      dispatch({ type: 'TOGGLE_POINT_FORM', payload: { open: false, point: null, categoryId: null } });
+    } else {
+      dispatch({ type: 'SET_DATA', payload: { pointOpen: true } });
+    }
+  };
+  const setEditingPoint = (v: ChecklistPoint | null) => dispatch({ type: 'SET_DATA', payload: { editingPoint: v } });
+  const setSavingPoint = (v: boolean) => dispatch({ type: 'SET_SAVING', payload: { field: 'point', value: v } });
+  const setPointError = (v: string | null) => dispatch({ type: 'SET_ERROR', payload: { field: 'point', value: v } });
+  const setBusyId = (v: string | null) => dispatch({ type: 'SET_BUSY_ID', payload: v });
+  const setArchiveQuery = (v: string) => dispatch({ type: 'SET_ARCHIVE', payload: { showArchived, query: v } });
+  const setEditingTitle = (v: boolean) => dispatch({ type: 'SET_DATA', payload: { editingTitle: v } });
+  const setEditingInstruction = (v: boolean) => dispatch({ type: 'SET_DATA', payload: { editingInstruction: v } });
+  const setTitleDraft = (v: string) => dispatch({ type: 'UPDATE_INLINE_DRAFT', payload: { titleDraft: v } });
+  const setInstructionDraft = (v: string) => dispatch({ type: 'UPDATE_INLINE_DRAFT', payload: { instructionDraft: v } });
+  const setSavingInline = (v: boolean) => dispatch({ type: 'SET_SAVING', payload: { field: 'inline', value: v } });
+  const [pointCategoryId, setPointCategoryId] = useState<string | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<ChecklistPoint | null>(null);
+  const [isCopySopOpen, setIsCopySopOpen] = useState<boolean>(false);
+  const [pointMethod, setPointMethod] = useState<'per_item' | 'per_category'>('per_item');
+  const [catTargetPoints, setCatTargetPoints] = useState<number>(10);
+
+  // Bulk Point Drafts state (mengumpulkan perubahan poin tanpa langsung reload/save)
+  const [pointDrafts, setPointDrafts] = useState<Record<string, number>>({});
+  const [isSavingBulk, setIsSavingBulk] = useState<boolean>(false);
+
+  const changedPointCount = Object.keys(pointDrafts).length;
+
+  const handleInlinePointUpdate = (pointId: string, nextPoints: number) => {
+    // Cari nilai awal dari categories
+    let originalPoints: number | undefined;
+    for (const cat of categories) {
+      const p = cat.points.find((item) => item.id === pointId);
+      if (p) {
+        originalPoints = p.points ?? 0;
+        break;
+      }
+    }
+
+    setPointDrafts((prev) => {
+      // Jika dikembalikan ke nilai awal, hapus dari drafts
+      if (originalPoints !== undefined && nextPoints === originalPoints) {
+        const next = { ...prev };
+        delete next[pointId];
+        return next;
+      }
+      return { ...prev, [pointId]: nextPoints };
+    });
+  };
+
+  const handleResetPointDraft = (pointId: string) => {
+    setPointDrafts((prev) => {
+      const next = { ...prev };
+      delete next[pointId];
+      return next;
+    });
+  };
+
+  const handleResetAllPointDrafts = () => {
+    setPointDrafts({});
+  };
+
+  const handleBulkSavePoints = async () => {
+    const entries = Object.entries(pointDrafts);
+    if (entries.length === 0) return;
+
+    setIsSavingBulk(true);
+    try {
+      const res = await apiFetch<{ message: string; results: { id: string; success: boolean; points?: number; error?: string }[] }>(
+        '/api/admin/checklist-points/bulk',
+        {
+          method: 'POST',
+          json: {
+            items: entries.map(([id, points]) => ({ id, points })),
+            reason: 'Simpan serentak poin aktivitas builder',
+          },
+        }
+      );
+
+      toast.success(res.message || 'Semua perubahan poin berhasil disimpan');
+      setPointDrafts({});
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal menyimpan serentak perubahan poin');
+    } finally {
+      setIsSavingBulk(false);
+    }
+  };
+
+  // Unsaved changes detection
+  const isDirty = categoryName.trim() !== '' || titleDraft !== '' || instructionDraft !== '';
+  useUnsavedChanges(isDirty);
+
+  // Auto-save draft (hanya draft teks, bukan data yang sudah tersimpan)
+  const { savedAt: draftSavedAt, clearDraft, readDraft } = useAutoSaveDraft({
+    key: 'mycheck.checklist-builder.draft',
+    isDirty,
+    getValue: () => ({
+      categoryName,
+      categorySort,
+      categoryActive,
+      categoryColor,
+      titleDraft,
+      instructionDraft,
+    }),
+  });
+
+  const restoreDraft = () => {
+    const draft = readDraft();
+    if (!draft) return;
+    dispatch({
+      type: 'UPDATE_CATEGORY_DRAFT',
+      payload: {
+        categoryName: draft.value.categoryName ?? '',
+        categorySort: draft.value.categorySort ?? 0,
+        categoryActive: draft.value.categoryActive ?? true,
+        categoryColor: draft.value.categoryColor ?? '',
+      },
+    });
+    dispatch({
+      type: 'UPDATE_INLINE_DRAFT',
+      payload: {
+        titleDraft: draft.value.titleDraft ?? '',
+        instructionDraft: draft.value.instructionDraft ?? '',
+      },
+    });
+    dispatch({ type: 'TOGGLE_CATEGORY_FORM', payload: { open: true, category: null } });
+  };
+
+  useEffect(() => {
+    const loadBranches = async () => {
+      try {
+        const data = await listBranches();
+        const active = data.branches.filter((b) => b.isActive);
+        setBranches(active);
+        if (active.length > 0) {
+          setBranchId(branchId || active[0].id);
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Gagal memuat cabang');
+      }
+    };
+    loadBranches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!branchId) return;
+    setShiftId('');
+    listShifts(branchId)
+      .then((data) => setShifts(data.shifts))
+      .catch((err: unknown) =>
+        toast.error(err instanceof Error ? err.message : 'Gagal memuat shift')
+      );
+  }, [branchId]);
+
+  const loadTree = useCallback(async (id: string) => {
+    if (!id) {
+      dispatch({ type: 'SET_DATA', payload: { categories: [] } });
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await listCategories(id);
+      const withPoints: CategoryWithPoints[] = await Promise.all(
+        data.categories.map(async (cat) => {
+          try {
+            const points = await listPoints(cat.id);
+            return { ...cat, points: points?.points ?? [] };
+          } catch {
+            return { ...cat, points: [] };
+          }
+        })
+      );
+      dispatch({ type: 'SET_DATA', payload: { categories: withPoints } });
+      setSelectedCategoryId(
+        selectedCategoryId && withPoints.some((c) => c.id === selectedCategoryId)
+          ? selectedCategoryId
+          : (withPoints[0]?.id ?? null)
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal memuat section SOP');
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategoryId]);
+
+  useEffect(() => {
+    loadTree(shiftId);
+  }, [shiftId, loadTree]);
+
+  const [splitCategoryTarget, setSplitCategoryTarget] = useState<CategoryWithPoints | null>(null);
+
+  const handleApplySplitCategory = async (
+    distributed: { id?: string; name: string; oldPoints: number; newPoints: number }[]
+  ) => {
+    // Masukkan hasil split langsung ke draft points sehingga admin bisa review sebelum bulk save
+    const nextDrafts = { ...pointDrafts };
+    for (const d of distributed) {
+      if (d.id) {
+        nextDrafts[d.id] = d.newPoints;
+      }
+    }
+    setPointDrafts(nextDrafts);
+    toast.success(`Poin berhasil dibagi rata untuk ${distributed.length} item (masuk ke draft)`);
+    setSplitCategoryTarget(null);
+  };
+
+  const submitCategory = async (values: CategoryFormValues) => {
+    if (!shiftId) return;
+    setSavingCategory(true);
+    setCategoryError(null);
+    try {
+      if (editingCategory) {
+        await updateCategory(editingCategory.id, values);
+        toast.success('Section diperbarui');
+      } else {
+        await createCategory(shiftId, values);
+        toast.success('Section ditambahkan');
+      }
+      dispatch({ type: 'TOGGLE_CATEGORY_FORM', payload: { open: false, category: null } });
+      await loadTree(shiftId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menyimpan section SOP';
+      setCategoryError(message);
+      toast.error(message);
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
+  const toggleCategory = async (cat: SopCategory) => {
+    if (cat.isActive && !window.confirm(`Hapus section "${cat.name}" dari daftar aktif? Riwayat checklist tetap disimpan.`)) return;
+    try {
+      if (cat.isActive) {
+        await updateCategory(cat.id, { isActive: false });
+        toast.success('Kategori diarsipkan. Riwayat checklist tetap tersimpan.');
+      } else {
+        await updateCategory(cat.id, { isActive: true });
+        toast.success('Kategori diaktifkan');
+      }
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal mengubah status section');
+    }
+  };
+
+  const togglePoint = async (point: ChecklistPoint) => {
+    if (point.isActive && !window.confirm(`Hapus item checklist "${point.title}" dari daftar aktif? Riwayat tetap disimpan.`)) return;
+    try {
+      if (point.isActive) {
+        await updatePoint(point.id, { isActive: false });
+        toast.success('Item diarsipkan. Riwayat checklist tetap tersimpan.');
+      } else {
+        await updatePoint(point.id, { isActive: true });
+        toast.success('Item diaktifkan');
+      }
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal mengubah status item');
+    }
+  };
+
+  const submitPoint = async (values: PointFormValues) => {
+    const targetCatId = pointCategoryId || state.pointCategoryId || editingPoint?.sopCategoryId || selectedCategoryId;
+    if (!targetCatId) {
+      toast.error('Kategori tidak valid atau belum dipilih');
+      return;
+    }
+    setSavingPoint(true);
+    setPointError(null);
+    try {
+      if (editingPoint) {
+        await updatePoint(editingPoint.id, values);
+        toast.success('Item checklist diperbarui');
+      } else {
+        const created = await createPoint(targetCatId, values);
+        toast.success('Item checklist ditambahkan');
+        // Tampilkan item baru segera di UI (optimistic) tanpa menunggu reload.
+        if (created?.point) {
+          dispatch({
+            type: 'SET_DATA',
+            payload: {
+              categories: categories.map((cat) =>
+                cat.id === targetCatId
+                  ? { ...cat, points: [...(cat.points ?? []), created.point as ChecklistPoint] }
+                  : cat
+              ),
+            },
+          });
+        }
+      }
+      dispatch({ type: 'TOGGLE_POINT_FORM', payload: { open: false, point: null, categoryId: null } });
+      setPointCategoryId(null);
+      await loadTree(shiftId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal menyimpan pertanyaan';
+      setPointError(message);
+      toast.error(message);
+    } finally {
+      setSavingPoint(false);
+    }
+  };
+
+  const duplicateCategory = async (cat: SopCategory) => {
+    setBusyId(cat.id);
+    try {
+      await duplicateCategoryApi(cat.id);
+      toast.success(`Kategori "${cat.name}" diduplikasi beserta itemnya`);
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal menduplikasi section');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const duplicatePoint = async (point: ChecklistPoint) => {
+    setBusyId(point.id);
+    try {
+      await duplicatePointApi(point.id);
+      toast.success(`Item "${point.title}" diduplikasi`);
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal menduplikasi item');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const swapCategoryOrder = async (from: number, to: number) => {
+    const a = categories[from];
+    const b = categories[to];
+    if (!a || !b) return;
+    const prev = categories;
+    const next = [...prev];
+    next[from] = b;
+    next[to] = a;
+    dispatch({ type: 'SET_DATA', payload: { categories: next } });
+    try {
+      await updateCategory(a.id, { sortOrder: b.sortOrder ?? 0 });
+      await updateCategory(b.id, { sortOrder: a.sortOrder ?? 0 });
+      toast.success('Urutan section diperbarui');
+    } catch (err) {
+      dispatch({ type: 'SET_DATA', payload: { categories: prev } });
+      toast.error(err instanceof Error ? err.message : 'Gagal mengubah urutan section');
+    }
+  };
+
+  const swapPointOrder = async (catId: string, from: number, to: number) => {
+    const cat = categories.find((c) => c.id === catId);
+    const a = cat?.points[from];
+    const b = cat?.points[to];
+    if (!cat || !a || !b) return;
+    const prev = categories;
+    const next = prev.map((c) => {
+      if (c.id !== catId) return c;
+      const points = [...c.points];
+      points[from] = b;
+      points[to] = a;
+      return { ...c, points };
+    });
+    dispatch({ type: 'SET_DATA', payload: { categories: next } });
+    try {
+      await updatePoint(a.id, { sortOrder: b.sortOrder });
+      await updatePoint(b.id, { sortOrder: a.sortOrder });
+      toast.success('Urutan item diperbarui');
+    } catch (err) {
+      dispatch({ type: 'SET_DATA', payload: { categories: prev } });
+      toast.error(err instanceof Error ? err.message : 'Gagal mengubah urutan item');
+    }
+  };
+
+  // Inline editing helpers
+  const startEditTitle = () => {
+    if (!selectedPoint) return;
+    dispatch({ type: 'START_INLINE_EDIT_TITLE', payload: selectedPoint.title });
+  };
+
+  const startEditInstruction = () => {
+    if (!selectedPoint) return;
+    dispatch({ type: 'START_INLINE_EDIT_INSTRUCTION', payload: selectedPoint.instruction ?? '' });
+  };
+
+  const saveInlineTitle = async () => {
+    if (!selectedPoint) return;
+    const trimmed = titleDraft.trim();
+    if (trimmed.length < 2) {
+      toast.error('Judul minimal 2 karakter');
+      return;
+    }
+    setSavingInline(true);
+    try {
+      await updatePoint(selectedPoint.id, { title: trimmed });
+      dispatch({ type: 'SET_DATA', payload: { editingTitle: false, titleDraft: '' } });
+      toast.success('Judul diperbarui');
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal menyimpan judul');
+    } finally {
+      setSavingInline(false);
+    }
+  };
+
+  const saveInlineInstruction = async () => {
+    if (!selectedPoint) return;
+    const trimmed = instructionDraft.trim();
+    setSavingInline(true);
+    try {
+      await updatePoint(selectedPoint.id, { instruction: trimmed === '' ? null : trimmed });
+      dispatch({ type: 'SET_DATA', payload: { editingInstruction: false, instructionDraft: '' } });
+      toast.success('Petunjuk diperbarui');
+      await loadTree(shiftId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Gagal menyimpan petunjuk');
+    } finally {
+      setSavingInline(false);
+    }
+  };
+
+  const normalizedArchiveQuery = archiveQuery.trim().toLowerCase();
+  const visibleCategories = categories
+    .filter((category) =>
+      showArchived
+        ? !category.isActive || category.points.some((point) => !point.isActive)
+        : category.isActive
+    )
+    .map((category) => {
+      const categoryMatches = category.name.toLowerCase().includes(normalizedArchiveQuery);
+      const points = category.points.filter((point) =>
+        point.isActive !== showArchived &&
+        (!showArchived || categoryMatches || point.title.toLowerCase().includes(normalizedArchiveQuery))
+      );
+      return {
+        ...category,
+        hasChecklistPoints: category.points.length > 0,
+        points,
+      };
+    })
+    .filter((category) =>
+      !showArchived ||
+      normalizedArchiveQuery.length === 0 ||
+      category.name.toLowerCase().includes(normalizedArchiveQuery) ||
+      category.points.length > 0
+    );
+  if (selectedPoint && selectedPoint.id !== selectedPointId) {
+    setSelectedPoint(null);
+  }
+  if (!selectedPoint && selectedPointId) {
+    const found = visibleCategories
+      .flatMap((category) => category.points)
+      .find((point) => point.id === selectedPointId);
+    if (found) setSelectedPoint(found);
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header (h1 + padding) TIDAK dirender di sini — sudah dipegang oleh
+          app/admin/checklist/layout.tsx bersama tab-nya. Dulunya builder ini
+          punya header sendiri, tapi setelah pindah jadi sub-route halaman
+          yang punya layout itu, header ganda akan muncul. */}
+      <TemplateNotice />
+
+      {/* Indikator draft tersimpan + aksi draft */}
+      {(draftSavedAt || isDirty) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-canvas px-3 py-2 text-xs text-ink-muted">
+          <span>
+            {draftSavedAt
+              ? `Draft tersimpan ${new Date(draftSavedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`
+              : 'Ada isian yang belum disimpan'}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={restoreDraft}>
+              Mulai dari draft
+            </Button>
+            <Button variant="ghost" size="sm" onClick={clearDraft}>
+              Hapus draft
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <ArchiveFilter
+        archived={showArchived}
+        onChange={(archived) => {
+          dispatch({ type: 'SET_ARCHIVE', payload: { showArchived: archived, query: '' } });
+          setShiftId(
+            shifts.some((shift) => shift.id === shiftId && shift.isActive !== archived)
+              ? shiftId
+              : ''
+          );
+          setSelectedCategoryId(null);
+          setSelectedPointId(null);
+        }}
+        activeCount={categories.reduce(
+          (total, category) => total + Number(category.isActive) + category.points.filter((point) => point.isActive).length,
+          0
+        )}
+        archivedCount={categories.reduce(
+          (total, category) => total + Number(!category.isActive) + category.points.filter((point) => !point.isActive).length,
+          0
+        )}
+        searchValue={archiveQuery}
+        onSearchChange={setArchiveQuery}
+        searchPlaceholder="Cari section atau item checklist arsip..."
+      />
+
+      <div className="grid items-start gap-4 xl:grid-cols-12 xl:gap-5">
+        <section
+          className="space-y-4 rounded-lg border border-border bg-surface p-4 xl:col-span-3"
+          aria-label="Pilih cabang dan shift"
+        >
+          <h2 className="text-sm font-semibold">Cabang dan shift</h2>
+          <div className="space-y-2">
+            <label htmlFor="cb-branch" className="text-sm font-medium text-ink-muted">
+              Cabang
+            </label>
+            <Select value={branchId} onValueChange={setBranchId}>
+              <SelectTrigger id="cb-branch" className="min-h-12">
+                <SelectValue placeholder="Pilih cabang" />
+              </SelectTrigger>
+              <SelectContent>
+                {branches.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name} ({b.code})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="cb-shift" className="text-sm font-medium text-ink-muted">
+              Shift
+            </label>
+            <Select value={shiftId} onValueChange={setShiftId}>
+              <SelectTrigger id="cb-shift" className="min-h-12">
+                <SelectValue placeholder="Pilih shift" />
+              </SelectTrigger>
+              <SelectContent>
+                {shifts.filter((shift) => shift.isActive !== showArchived).map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.name} ({s.startTime} - {s.endTime}){showArchived ? ' · Arsip' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-sm leading-6 text-ink-muted">
+            Definisi shift dibuat di halaman <span className="font-medium">Shift</span>.
+          </p>
+
+          {shiftId && !showArchived && (
+            <div className="pt-3 border-t border-border">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full justify-start gap-2 text-xs"
+                onClick={() => setIsCopySopOpen(true)}
+              >
+                <Copy className="h-3.5 w-3.5 text-primary" />
+                <span>Salin SOP dari Shift Lain</span>
+              </Button>
+            </div>
+          )}
+        </section>
+
+        <section
+          className="min-w-0 space-y-3 rounded-lg border border-border bg-surface p-4 xl:col-span-5"
+          aria-label="Form builder section dan pertanyaan"
+        >
+          {!shiftId && (
+            <p className="rounded-lg border border-dashed border-border p-4 text-sm text-ink-muted">
+              Pilih shift untuk mulai menyusun formulir SOP
+            </p>
+          )}
+          {shiftId && loading && <LoadingHint className="justify-start p-0">Memuat formulir…</LoadingHint>}
+          {shiftId && !loading && (
+            <>
+              <div className="p-3 bg-blue-50/80 dark:bg-blue-950/30 text-blue-800 dark:text-blue-300 rounded-lg border border-blue-200/60 dark:border-blue-900/40 text-xs flex items-center gap-2 mb-2">
+                <Info className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
+                <span>Perubahan bobot poin berlaku untuk shift berikutnya. Laporan dan shift yang sedang atau sudah berjalan tidak akan terpengaruh.</span>
+              </div>
+              <CategoryTree
+                categories={visibleCategories}
+                archivedView={showArchived}
+                emptyMessage={showArchived ? 'Belum ada konfigurasi di arsip.' : 'Belum ada section aktif.'}
+                selectedCategoryId={selectedCategoryId}
+                onSelectCategory={setSelectedCategoryId}
+                selectedPointId={selectedPointId}
+                onSelectPoint={(point) => {
+                  setSelectedPointId(point.id);
+                  setSelectedPoint(point);
+                }}
+                onAddCategory={() => {
+                  dispatch({ type: 'TOGGLE_CATEGORY_FORM', payload: { open: true, category: null } });
+                }}
+                onEditCategory={(cat) => {
+                  dispatch({ type: 'START_EDIT_CATEGORY', payload: cat });
+                }}
+                onToggleCategory={toggleCategory}
+                onAddPoint={(categoryId) => {
+                  setPointCategoryId(categoryId);
+                  dispatch({ type: 'TOGGLE_POINT_FORM', payload: { open: true, point: null, categoryId } });
+                }}
+                onEditPoint={(point) => {
+                  setPointCategoryId(point.sopCategoryId);
+                  setSelectedPointId(point.id);
+                  setSelectedPoint(point);
+                  dispatch({ type: 'START_EDIT_POINT', payload: point });
+                }}
+                onTogglePoint={togglePoint}
+                onDuplicateCategory={(cat) => void duplicateCategory(cat)}
+                onDuplicatePoint={(point) => void duplicatePoint(point)}
+                onReorderCategory={(from, to) => void swapCategoryOrder(from, to)}
+                onReorderPoint={(categoryId, from, to) => void swapPointOrder(categoryId, from, to)}
+                pointDrafts={pointDrafts}
+                onUpdatePointPoints={handleInlinePointUpdate}
+                onResetPointDraft={handleResetPointDraft}
+                onSplitCategory={(cat) => setSplitCategoryTarget(cat)}
+                busyId={busyId}
+              />
+            </>
+          )}
+        </section>
+
+        <aside
+          className="hidden xl:block xl:col-span-4 sticky top-6 space-y-4 rounded-xl border border-border bg-surface p-4 shadow-sm"
+          aria-label="Detail pertanyaan checklist"
+        >
+          <div className="flex items-center justify-between pb-2 border-b border-border">
+            <h2 className="text-sm font-semibold text-ink">Detail Item Checklist</h2>
+            {selectedPoint && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-ink-muted hover:text-ink"
+                onClick={() => {
+                  setSelectedPointId(null);
+                  setSelectedPoint(null);
+                }}
+              >
+                Tutup
+              </Button>
+            )}
+          </div>
+
+          {!selectedPoint && (
+            <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-ink-muted">
+              <p>Pilih salah satu item checklist pada daftar untuk melihat dan menyunting detailnya secara instan.</p>
+            </div>
+          )}
+
+          {selectedPoint && (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-xs font-medium text-ink-muted">Judul Pertanyaan</span>
+                  <Badge variant={selectedPoint.isActive ? 'default' : 'secondary'}>
+                    {selectedPoint.isActive ? 'Aktif' : 'Nonaktif'}
+                  </Badge>
+                </div>
+                {editingTitle ? (
+                  <div className="space-y-2">
+                    <Input
+                      value={titleDraft}
+                      onChange={(e) => setTitleDraft(e.target.value)}
+                      className="text-sm font-semibold"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void saveInlineTitle();
+                        if (e.key === 'Escape') setEditingTitle(false);
+                      }}
+                    />
+                    <div className="flex gap-1.5">
+                      <Button size="sm" onClick={() => void saveInlineTitle()} disabled={savingInline}>
+                        <Check className="h-3.5 w-3.5 mr-1" /> Simpan
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditingTitle(false)}>
+                        <X className="h-3.5 w-3.5" /> Batal
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-start justify-between gap-2 p-2.5 rounded-lg border border-border bg-canvas/50">
+                    <span className="text-sm font-semibold text-ink leading-snug">{selectedPoint.title}</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={startEditTitle}
+                      className="h-6 w-6 p-0 shrink-0 text-ink-muted hover:text-ink"
+                      title="Klik untuk mengubah judul"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Bobot Poin Adjustment in Inspector */}
+              <div className="p-3 rounded-lg border border-border bg-canvas/40 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-ink">Bobot Poin</span>
+                    <p className="text-[11px] text-ink-muted">Tersambung ke simpan serentak (draft)</p>
+                  </div>
+                  <PointInput
+                    value={pointDrafts[selectedPoint.id] !== undefined ? pointDrafts[selectedPoint.id] : (selectedPoint.points ?? 0)}
+                    onChange={(val) => handleInlinePointUpdate(selectedPoint.id, val)}
+                    size="sm"
+                  />
+                </div>
+                {pointDrafts[selectedPoint.id] !== undefined && pointDrafts[selectedPoint.id] !== selectedPoint.points && (
+                  <div className="flex items-center justify-between text-xs pt-1 border-t border-border/50">
+                    <span className="text-amber-700 font-medium">Draft belum disimpan</span>
+                    <button
+                      type="button"
+                      onClick={() => handleResetPointDraft(selectedPoint.id)}
+                      className="text-ink-muted underline hover:text-ink text-[11px]"
+                    >
+                      Reset ({selectedPoint.points ?? 0})
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Petunjuk SOP */}
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-ink-muted">Petunjuk / Instruksi</span>
+                {editingInstruction ? (
+                  <div className="space-y-2">
+                    <Textarea
+                      value={instructionDraft}
+                      onChange={(e) => setInstructionDraft(e.target.value)}
+                      rows={3}
+                      autoFocus
+                    />
+                    <div className="flex gap-1.5">
+                      <Button size="sm" onClick={() => void saveInlineInstruction()} disabled={savingInline}>
+                        <Check className="h-3.5 w-3.5 mr-1" /> Simpan
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditingInstruction(false)}>
+                        <X className="h-3.5 w-3.5" /> Batal
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-start justify-between gap-2 p-2.5 rounded-lg border border-border bg-canvas/50">
+                    <span className="text-xs text-ink-muted leading-relaxed">
+                      {selectedPoint.instruction || 'Belum ada petunjuk tambahan untuk item ini.'}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={startEditInstruction}
+                      className="h-6 w-6 p-0 shrink-0 text-ink-muted hover:text-ink"
+                      title="Klik untuk mengubah petunjuk"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              {/* Metadata Grid */}
+              <dl className="grid grid-cols-2 gap-2 p-3 rounded-lg border border-border bg-canvas/30 text-xs">
+                <div>
+                  <dt className="text-ink-muted">Tipe Input</dt>
+                  <dd className="font-medium text-ink mt-0.5">
+                    {(selectedPoint.inputTypes?.length ? selectedPoint.inputTypes : [selectedPoint.inputType])
+                      .map((type) => INPUT_TYPE_LABEL[type] ?? type)
+                      .join(', ')}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink-muted">Wajib Diisi</dt>
+                  <dd className="font-medium text-ink mt-0.5">
+                    {selectedPoint.isRequired ? (
+                      <span className="text-rose-600 font-semibold">Ya (Wajib)</span>
+                    ) : (
+                      'Opsional'
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink-muted">Target Waktu</dt>
+                  <dd className="font-medium text-ink mt-0.5">{selectedPoint.targetTime || '—'}</dd>
+                </div>
+                <div>
+                  <dt className="text-ink-muted">Toleransi</dt>
+                  <dd className="font-medium text-ink mt-0.5">
+                    {selectedPoint.toleranceMinutes ? `${selectedPoint.toleranceMinutes} mnt` : '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink-muted">Hari Aktif</dt>
+                  <dd className="font-medium text-ink mt-0.5">{selectedPoint.activeDays || 'Setiap Hari'}</dd>
+                </div>
+                <div>
+                  <dt className="text-ink-muted">Urutan</dt>
+                  <dd className="font-medium text-ink mt-0.5">#{selectedPoint.sortOrder}</dd>
+                </div>
+              </dl>
+
+              {/* Action: Open Full Modal */}
+              <div className="pt-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full gap-1.5"
+                  onClick={() => {
+                    setPointCategoryId(selectedPoint.sopCategoryId);
+                    setEditingPoint(selectedPoint);
+                    setPointError(null);
+                    setPointOpen(true);
+                  }}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  <span>Ubah Form Lengkap</span>
+                </Button>
+              </div>
+            </div>
+          )}
+        </aside>
+
+      </div>
+
+      <Dialog open={categoryOpen} onOpenChange={setCategoryOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {editingCategory ? 'Ubah section' : 'Tambah section'}
+            </DialogTitle>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (categoryName.trim().length < 2) return;
+              void submitCategory({
+                name: categoryName.trim(),
+                sortOrder: categorySort,
+                isActive: categoryActive,
+                color: categoryColor,
+              });
+            }}
+            className="space-y-3"
+          >
+            <div className="space-y-1">
+              <Label htmlFor="cb-category-name">Nama section</Label>
+              <Input
+                id="cb-category-name"
+                value={categoryName}
+                onChange={(e) => { setCategoryName(e.target.value); setCategoryError(null); }}
+                placeholder="mis. Dapur"
+                required
+                minLength={2}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="cb-category-sort">Urutan</Label>
+                <Input
+                  id="cb-category-sort"
+                  type="number"
+                  inputMode="numeric"
+                  value={categorySort}
+                  onChange={(e) => { setCategorySort(Number(e.target.value) || 0); setCategoryError(null); }}
+                />
+              </div>
+              <label className="flex items-end gap-2 pb-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={categoryActive}
+                  onChange={(e) => { setCategoryActive(e.target.checked); setCategoryError(null); }}
+                  className="h-4 w-4"
+                />
+                Aktif
+              </label>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="cb-category-color">Warna section</Label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="cb-category-color"
+                  type="color"
+                  value={categoryColor || '#9ca3af'}
+                  onChange={(e) => { setCategoryColor(e.target.value); setCategoryError(null); }}
+                  className="h-8 w-10 cursor-pointer rounded border border-border bg-surface p-0.5"
+                  aria-label="Warna section (hex)"
+                />
+                <Input
+                  value={categoryColor}
+                  onChange={(e) => { setCategoryColor(e.target.value); setCategoryError(null); }}
+                  placeholder="#4ade80"
+                  className="w-28 font-mono text-xs"
+                  aria-label="Kode warna hex"
+                />
+                {categoryColor && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setCategoryColor('')}
+                    title="Kembali ke warna default (abu-abu)"
+                  >
+                    Default
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-ink-muted">Kosong = default abu-abu. Dipakai pada header section di checklist &amp; laporan.</p>
+            </div>
+            {categoryError && <p className="text-sm text-danger">{categoryError}</p>}
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setCategoryOpen(false)}
+              >
+                Batal
+              </Button>
+              <Button type="submit" disabled={savingCategory}>
+                {savingCategory ? 'Menyimpan...' : 'Simpan'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <PointEditorDialog
+        open={pointOpen}
+        onOpenChange={setPointOpen}
+        point={editingPoint}
+        saving={savingPoint}
+        error={pointError}
+        onClearError={() => setPointError(null)}
+        onSubmit={submitPoint}
+      />
+
+      {splitCategoryTarget && (
+        <SplitPreviewDialog
+          isOpen={Boolean(splitCategoryTarget)}
+          onClose={() => setSplitCategoryTarget(null)}
+          onApply={handleApplySplitCategory}
+          title={`Bagi Rata Poin Section: ${splitCategoryTarget.name}`}
+          items={splitCategoryTarget.points.map((p) => ({
+            id: p.id,
+            name: p.title,
+            points: pointDrafts[p.id] !== undefined ? pointDrafts[p.id] : (p.points ?? 0),
+          }))}
+        />
+      )}
+
+      {/* Sticky Floating Bar for Unsaved Bulk Points Draft */}
+      {changedPointCount > 0 && (
+        <div className="fixed bottom-6 inset-x-0 z-50 flex justify-center px-4 pointer-events-none">
+          <div className="bg-slate-900 text-white px-5 py-3.5 rounded-2xl shadow-2xl border border-slate-700/80 flex items-center justify-between gap-4 max-w-xl w-full pointer-events-auto animate-in fade-in slide-in-from-bottom-5 duration-200">
+            <div className="flex items-center gap-3">
+              <span className="flex h-3 w-3 rounded-full bg-amber-400 animate-pulse" />
+              <div className="text-xs sm:text-sm">
+                <span className="font-semibold text-white">{changedPointCount} item checklist</span>
+                <span className="text-slate-400"> mengalami perubahan poin (draft).</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleResetAllPointDrafts}
+                disabled={isSavingBulk}
+                className="px-3 py-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleBulkSavePoints()}
+                disabled={isSavingBulk}
+                className="px-4 py-1.5 text-xs font-semibold bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg shadow transition-all active:scale-95 disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {isSavingBulk ? (
+                  <>
+                    <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-solid border-current border-r-transparent" />
+                    <span>Menyimpan...</span>
+                  </>
+                ) : (
+                  <span>Simpan Semua Perubahan</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Copy SOP from another Shift dialog */}
+      {shiftId && (
+        <CopySopDialog
+          isOpen={isCopySopOpen}
+          onClose={() => setIsCopySopOpen(false)}
+          targetShiftId={shiftId}
+          targetShiftName={shifts.find((s) => s.id === shiftId)?.name}
+          targetBranchId={branchId}
+          branches={branches}
+          onSuccess={async () => {
+            await loadTree(shiftId);
+          }}
+        />
+      )}
+    </div>
+  );
+}
